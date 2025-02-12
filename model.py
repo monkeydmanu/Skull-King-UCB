@@ -5,6 +5,7 @@ import torch.optim as optim
 import random
 import matplotlib.pyplot as plt
 import logging
+import torch.nn.functional as F
 
 """
 # Configuration du deuxième logger pour écrire dans test1.log
@@ -53,14 +54,14 @@ class DeepQNetwork(nn.Module):
         # IL FAUT INSTANCIER SIGMOID si on veut l'utiliser en dessous je pense
 
     def forward(self, x):
-        return  self.block1(x) # nn.Softmax(dim=0)(self.block1(x))
+        return self.block1(x) # nn.Softmax(dim=0)(self.block1(x))
     #nn.Softmax(dim=-1)
 # utiliser SOFTMAX a la place de sigmoid
 
 
 
 class BaseAgent:
-    def __init__(self, gamma, epsilon_jouer, epsilon_predire, lr, input_dims, n_actions_jouer, n_actions_predire, max_mem_size=10000, eps_end=0.05, eps_dec_jouer=5e-4, eps_dec_predire=5e-3):
+    def __init__(self, gamma, lr, input_dims, n_actions_jouer, n_actions_predire, max_mem_size=10000):
         self.illegal_moves_count_predire = 0
         self.illegal_moves_count = 0
         self.illegal_moves_per_game = []
@@ -69,24 +70,18 @@ class BaseAgent:
         self.loss_learn_seul = []
         self.current_loss_learn_sum = 0
         self.current_loss_learn_seul_sum = 0
-        # Suivi des valeurs d'epsilon
-        self.epsilon_jouer_history = [epsilon_jouer]
-        self.epsilon_predire_history = [epsilon_predire]
         self.gamma = gamma
-        self.epsilon_jouer = epsilon_jouer  # Epsilon pour jouer
-        self.epsilon_predire = epsilon_predire  # Epsilon pour prédire les plis
-        self.eps_min = eps_end
-        self.eps_dec_jouer = eps_dec_jouer
-        self.eps_dec_predire = eps_dec_predire
         self.lr = lr
         self.mem_size = max_mem_size
         self.mem_cntr = 0
         self.mem_cntr_predire = 0
-        self.iter_cntr = 0
         device = T.device('cuda' if T.cuda.is_available() else 'cpu')
         self.n_actions_jouer = n_actions_jouer
         self.n_actions_predire = n_actions_predire
         self.input_dims = input_dims
+        self.c_history = []
+        self.nb_action_tot_jouer = 0
+        self.nb_action_tot_predire = 0
 
         # Modèle pour prédire
         self.Q_eval_jouer = DeepQNetwork(input_shape=input_dims, hidden_units=128, n_actions=self.n_actions_jouer, lr=self.lr, device=device)
@@ -95,6 +90,9 @@ class BaseAgent:
         # Modèle pour jouer
         self.Q_eval_predire = DeepQNetwork(input_shape=input_dims, hidden_units=128, n_actions=self.n_actions_predire, lr=self.lr, device=device)
         self.target_dqn_predire = DeepQNetwork(input_shape=input_dims, hidden_units=128, n_actions=self.n_actions_predire, lr=self.lr, device=device)
+
+        self.action_counts_jouer = np.zeros(n_actions_jouer)
+        self.action_counts_predire = np.zeros(n_actions_predire)
 
         # Mémoires pour les transitions
         self.state_memory = np.zeros((self.mem_size, *input_dims), dtype=np.float32)
@@ -114,26 +112,25 @@ class BaseAgent:
         # Réinitialiser les compteurs de mémoire et d'itérations
         self.mem_cntr = 0
         self.mem_cntr_predire = 0
-        self.iter_cntr = 0
         # Réinitialiser les mémoires
         self.state_memory.fill(0)
         self.new_state_memory.fill(0)
         self.action_memory.fill(0)
 
-    def update_epsilon(self):
-        # Suivi des valeurs d'epsilon
-        self.epsilon_jouer_history.append(self.epsilon_jouer)
-        self.epsilon_predire_history.append(self.epsilon_predire)
+    def update_c(self):
+        self.c_history.append(self.c)
 
     def save(self, filename, q_eval):
         checkpoint = {
             'model_state_dict': q_eval.state_dict(),
             'optimizer_state_dict': q_eval.optimizer.state_dict(),
-            'epsilon_jouer': self.epsilon_jouer,
             'mem_cntr': self.mem_cntr,
             'mem_cntr_predire': self.mem_cntr_predire,
-            'iter_cntr': self.iter_cntr,
-            'epsilon_predire': self.epsilon_predire
+            'count_action_jouer': self.action_counts_jouer,
+            'count_action_predire': self.action_counts_predire,
+            'nb_action_tot_jouer': self.nb_action_tot_jouer,
+            'nb_action_tot_predire': self.nb_action_tot_predire,
+            'c': self.c
         }
         T.save(checkpoint, filename)
 
@@ -144,17 +141,17 @@ class BaseAgent:
         checkpoint = T.load(filename)
         q_eval.load_state_dict(checkpoint['model_state_dict'])
         q_eval.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.epsilon_jouer = checkpoint['epsilon_jouer']
         self.mem_cntr = checkpoint['mem_cntr']
         self.mem_cntr_predire = checkpoint['mem_cntr_predire']
-        self.iter_cntr = checkpoint['iter_cntr']
-        self.epsilon_predire = checkpoint['epsilon_predire']
+        self.action_counts_jouer = checkpoint['count_action_jouer']
+        self.action_counts_predire = checkpoint['count_action_predire']
+        self.nb_action_tot_jouer = checkpoint['nb_action_tot_jouer']
+        self.nb_action_tot_predire = checkpoint['nb_action_tot_predire']
+        self.c = checkpoint['c']
 
         print(f"Agent loaded successfully from {filename}.")
 
     def clean_illegal_transitions(self):
-        # print(f"\n\n\n{self.mem_cntr = }, { self.state_memory.shape}")
-        # print(f"{self.state_memory[:5] = }\n")
 
         self.illegal_moves_count += 1
         if self.mem_cntr > 0:
@@ -168,9 +165,7 @@ class BaseAgent:
 
             # Réduire le compteur de mémoire
             self.mem_cntr -= 1
-
-        # print(f"{self.mem_cntr = }, { self.state_memory.shape}")
-        # print(f"{self.state_memory[:5] = }\n")
+            
 
     def clean_illegal_transitions_predire(self):
 
@@ -201,10 +196,12 @@ class BaseAgent:
         self.action_memory_predire[index] = action
         self.mem_cntr_predire += 1
 
+# Upper Confidence Bound (UCB)
 
 class Agent(BaseAgent):
-    def __init__(self, gamma, epsilon_jouer, epsilon_predire, lr, input_dims, n_actions_jouer, n_actions_predire, max_mem_size=10000, eps_end=0.05, eps_dec_jouer=5e-4, eps_dec_predire=5e-3):
-        super().__init__(gamma, epsilon_jouer, epsilon_predire, lr, input_dims, n_actions_jouer, n_actions_predire, max_mem_size, eps_end, eps_dec_jouer, eps_dec_predire)
+    def __init__(self, gamma, lr, input_dims, n_actions_jouer, n_actions_predire, max_mem_size=10000):
+        super().__init__(gamma, lr, input_dims, n_actions_jouer, n_actions_predire, max_mem_size)
+        self.c = 1
 
     def reset_game_loss(self):
         self.current_loss_learn_sum = 0
@@ -215,46 +212,50 @@ class Agent(BaseAgent):
         self.loss_learn_seul.append(self.current_loss_learn_seul_sum)
 
     def choose_action(self, observation, indice_carte_dispo=None, nb_prediction_max=None):
+        # UCB
+        state = T.tensor(np.array(observation), dtype=T.float32).to(self.Q_eval_jouer.device)
 
-        # print(f"{observation = }")
-        # print(f"{len(observation) = }")
-        if indice_carte_dispo: # jouer
-            epsilon = self.epsilon_jouer
-            # print(f"---------------------------------------\n, {self.epsilon_jouer = }")
-        else: # predire
-            epsilon = self.epsilon_predire
-            # print(f"---------------------------------------\n, {self.epsilon_predire = }")
+        if self.nb_action_tot_jouer % 200 == 0:
+            print(f"\n{self.nb_action_tot_jouer = }\n{self.nb_action_tot_predire = }\n{self.action_counts_jouer = }\n{self.action_counts_predire = }")
+        if indice_carte_dispo:
+            actions = self.Q_eval_jouer.forward(state)
+            q_values = F.softmax(actions, dim=0).detach().cpu().numpy()
+            ucbs = [q_values[i] + self.c * np.sqrt(np.log(self.nb_action_tot_jouer + 1) / ((self.action_counts_jouer[i] + 1))) for i in range(self.n_actions_jouer)]
+            #action = np.argmax(ucbs)
+            action = max(indice_carte_dispo, key=lambda i: ucbs[i].item())
 
-        # print(f"\n{observation = }")
-        if np.random.random() > epsilon:
-            # print("EXPLOITATION")
-            state = T.tensor(np.array(observation), dtype=T.float32).to(self.Q_eval_jouer.device)
-            if indice_carte_dispo:
-                actions = self.Q_eval_jouer.forward(state)
-            else:
-                actions = self.Q_eval_predire.forward(state)
-            # print(f"{actions = }")
-            action = T.argmax(actions).item()
+            if self.nb_action_tot_jouer % 200 == 0:
+                print(f"\n{q_values = }")
+                print(f"\nPour jouer {indice_carte_dispo = }: {ucbs = }")
+            self.action_counts_jouer[action] += 1
+            self.nb_action_tot_jouer += 1
+        else :
+            actions = self.Q_eval_predire.forward(state)
+            q_values = F.softmax(actions, dim=0).detach().cpu().numpy()
+            ucbs = [q_values[i] + self.c * np.sqrt(np.log(self.nb_action_tot_predire + 1) / ((self.action_counts_predire[i] + 1))) for i in range(self.n_actions_predire)]
+            action = max(range(nb_prediction_max), key=lambda i: ucbs[i].item())
+            #action = np.argmax(ucbs)
+            if self.nb_action_tot_predire % 20 == 0:
+                print(f"\n{q_values = }")
+                print(f"Pour predire {nb_prediction_max = } : {ucbs = }")
+            self.action_counts_predire[action] += 1
+            self.nb_action_tot_predire += 1
+
+        
+        if self.c < 0.2:
+            self.c = 0
         else:
-            if indice_carte_dispo:
-                # print("ALEATOIRE JOUER")
-                action = choix_indice_aleatoire_parmi_indice_carte_dispo(indice_carte_dispo)
-            else:
-                # print("ALEATOIRE PREDIRE")
-                action = choix_indice_aleatoire_parmi_nb_pli_max(nb_prediction_max)
-        # if indice_carte_dispo: # jouer
-        #     print("Jouer")
-        # else: # predire
-        #     print("PREDIRE")
-        # print(f"{action = }\n")
+            self.c = self.c * np.exp(-(1e-6)*self.mem_cntr)
+        # print(f"---------------- {self.c = } -------------------")
+
+        self.update_c()
+
         return action
     
     # dans learn j'appprends avec la meilleurs des 10 valeurs qui m'intéressent
     def learn_tout(self, reward):
 
-        # print("LEARN TOUT")
-        # print(f"\n{reward = }")
-        # Initialisation des listes pour accumuler les valeurs de Q
+        # POUR APPRENDRE POUR LES PLIS JOUES
         q_eval_list = []
         q_target_list = []
 
@@ -284,17 +285,11 @@ class Agent(BaseAgent):
             # Ajouter à la liste
             q_eval_list.append(current_q)
             q_target_list.append(target_q)
-        # print(f"{self.action_memory[:15] = }\n")
-        # print(f"{q_eval_list[-1] = }")
-        # print(f"{q_target_list[-1] = }")
 
-        
 
         # Création de tenseurs à partir des listes
         q_eval_tensor = T.stack(q_eval_list)
         q_target_tensor = T.stack(q_target_list)
-
-        # print(f"{q_eval_tensor[-1] = }")
 
         # Calcul de la perte
         loss = self.Q_eval_jouer.loss(q_eval_tensor, q_target_tensor).to(self.Q_eval_jouer.device)
@@ -303,16 +298,8 @@ class Agent(BaseAgent):
         loss.backward()
         self.Q_eval_jouer.optimizer.step()
 
-        # Mise à jour d'epsilon
-        self.iter_cntr += 1
-        self.epsilon_jouer = max(self.epsilon_jouer - (self.eps_dec_jouer * len(suite_indice_state_selectionner)), self.eps_min)
-        self.update_epsilon()
 
-        # --------------------------------------------------------------------------------------------------
-        # print("\n----------------------------------------------------------------")
-
-        # print(self.action_memory_predire[:20])
-        # Initialisation des listes pour accumuler les valeurs de Q
+        # POUR APPRENDRE SUR LES PREDICTIONS
         q_eval_list = []
         q_target_list = []
 
@@ -342,17 +329,12 @@ class Agent(BaseAgent):
             # Ajouter à la liste
             q_eval_list.append(current_q)
             q_target_list.append(target_q)
-        # print(f"{self.action_memory_predire[:15] = }\n")
-        # print(f"{q_eval_list[-1] = }")
-        # print(f"{q_target_list[-1] = }")
 
         
 
         # Création de tenseurs à partir des listes
         q_eval_tensor = T.stack(q_eval_list)
         q_target_tensor = T.stack(q_target_list)
-
-        # print(f"{q_eval_tensor[-1] = }")
 
         # Calcul de la perte
         loss = self.Q_eval_predire.loss(q_eval_tensor, q_target_tensor).to(self.Q_eval_predire.device)
@@ -361,10 +343,6 @@ class Agent(BaseAgent):
         loss.backward()
         self.Q_eval_predire.optimizer.step()
 
-        # Mise à jour d'epsilon
-        self.iter_cntr += 1
-        self.epsilon_predire = max(self.epsilon_predire - (self.eps_dec_predire * len(suite_indice_state_selectionner)), self.eps_min)
-        self.update_epsilon()
 
     # dans learn j'appprends avec la meilleurs des 10 valeurs qui m'intéressent
     def learn(self, reward):
@@ -385,7 +363,7 @@ class Agent(BaseAgent):
         batch_index = np.arange(nb_manche, dtype=np.int32)
 
         q_eval = self.Q_eval_jouer.forward(state_batch)
-        q_next= self.Q_eval_jouer.forward(new_state_batch)
+        q_next = self.Q_eval_jouer.forward(new_state_batch)
 
         self.Q_eval_jouer.optimizer.zero_grad()
 
@@ -427,22 +405,16 @@ class Agent(BaseAgent):
         loss_action.backward()
         self.Q_eval_jouer.optimizer.step()
 
-        self.iter_cntr += 1
-        self.epsilon_jouer = self.epsilon_jouer - (self.eps_dec_jouer*nb_manche) if self.epsilon_jouer > self.eps_min else self.eps_min # pour décroître par unité d'état
-
-        # Mise à jour de l'epsilon après apprentissage
-        self.update_epsilon()
-
     # dans learn_seul j'appprends avec la meilleurs des 20 valeurs
     def learn_seul(self, reward, plis_gagnes=None, is_predire=False):
 
         # print("LEARN SEUL")
         # print(f"{reward = }")
-        if is_predire and plis_gagnes is None:
+        if is_predire and plis_gagnes is None: # à enlever car juste pour dire que c'est pas un coup illégal
             indice = (self.mem_cntr_predire - 1) % self.mem_size if self.mem_cntr_predire > 0 else 0
-        elif plis_gagnes is None:
+        elif plis_gagnes is None: # à enlever, pour dire que la prédiction n'est pas illégal
             indice = (self.mem_cntr - 1) % self.mem_size if self.mem_cntr > 0 else 0
-        else:
+        else: # pour la fin de chaque manche, pour comparer le nombre de plis prédis avec le nombre de plis gagnés
             indice = (self.mem_cntr_predire - 1) % self.mem_size if self.mem_cntr_predire > 0 else 0
 
         """
@@ -480,9 +452,6 @@ class Agent(BaseAgent):
 
             target_q = self.target_dqn_predire.forward(state_batch)
             target_q[action_batch] = target
-
-            # print(f"{action_batch = }")
-            # print(f"{target_q = }\n {current_q = }")
 
         # pour learn_seul d'une mauvais action
         elif plis_gagnes is None:
@@ -540,13 +509,6 @@ class Agent(BaseAgent):
         else:
             self.Q_eval_predire.optimizer.step()
 
-        if is_predire:
-            self.epsilon_predire = max(self.epsilon_predire - self.eps_dec_predire, self.eps_min)
-        else:
-            self.epsilon_jouer = max(self.epsilon_jouer - self.eps_dec_jouer, self.eps_min)
-
-        # Mise à jour de l'epsilon après apprentissage
-        self.update_epsilon()
 
     # Visualisation des graphiques
     def plot_all_graphs(self, joueur):
@@ -583,15 +545,15 @@ class Agent(BaseAgent):
         plt.ylabel('Perte')
         plt.legend()
 
-        # 5ème graphique : Évolution des epsilon_jouer et epsilon_predire
+        # 5ème graphique : Évolution des c
         plt.subplot(3, 2, 5)
-        plt.plot(self.epsilon_jouer_history, label='Epsilon Jouer', color='b')
-        plt.plot(self.epsilon_predire_history, label='Epsilon Prédire', color='g')
-        plt.title('Évolution de Epsilon en fonction du temps')
+        plt.plot(self.c_history, label='Valeur de c', color='b')
+        plt.title('Évolution de c en fonction du temps')
         plt.xlabel('Itérations')
-        plt.ylabel('Valeur d\'Epsilon')
+        plt.ylabel('Valeur de c')
         plt.legend()
         plt.grid(True)
+
 
         # Affichage de tous les graphiques
         plt.tight_layout()

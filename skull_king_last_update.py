@@ -23,7 +23,7 @@ def attendre(duree_ms):
 logger_partie = logging.getLogger('logger_partie2')
 logger_partie.setLevel(logging.INFO)
 # Handler pour écrire dans le fichier partie2.log
-handler_partie = logging.FileHandler('partie3joueurs.log', mode='w')
+handler_partie = logging.FileHandler('partiejoueurs.log', mode='w')
 handler_partie.setFormatter(logging.Formatter('%(message)s'))
 logger_partie.addHandler(handler_partie)
 """
@@ -241,16 +241,11 @@ class Joueur:
 
     def init_agent(self):
         agent = model.Agent(self.agent_params[self.numero_agent]['gamma'],
-                                 self.agent_params[self.numero_agent]['epsilon_jouer'],
-                                 self.agent_params[self.numero_agent]['epsilon_predire'],
                                  self.agent_params[self.numero_agent]['lr'],
                                  self.agent_params[self.numero_agent]['input_dims'],
                                  self.agent_params[self.numero_agent]['n_actions_jouer'],
                                  self.agent_params[self.numero_agent]['n_actions_predire'],
-                                 self.agent_params[self.numero_agent]['max_mem_size'],
-                                 self.agent_params[self.numero_agent]['eps_end'],
-                                 self.agent_params[self.numero_agent]['eps_dec_jouer'],
-                                 self.agent_params[self.numero_agent]['eps_dec_predire']
+                                 self.agent_params[self.numero_agent]['max_mem_size']
                                  )
         # Charger les poids du modèle s'ils existent
         model_path = f"models{self.nb_de_joueur}/agent_jouer{int(self.nom[-1])}.pth"
@@ -382,6 +377,7 @@ class Partie:
                 # logger_test.info(f"{choix_prediction=}")
                 # Vérification de la validité de l'action
                 if choix_prediction > self.tour or choix_prediction < 0:
+                    print("ATTENDS Y A DES COUPS ILLEGAUXXXXXXXXXXXXXXXXXXXXXXXX")
                     # print(f"ta fais de la D pour predire, tu as choisi {choix_prediction+10}")
                     # Si l'action est illégale, on apprend directement un malus et réinitialise l'état et rejouer
                     # print(f"{joueur.nom}")
@@ -555,6 +551,8 @@ class Partie:
         state.append(joueur.points)
         state.append(joueur.points_bonus)
 
+        state = [x if isinstance(x, bool) else round(x) for x in state]
+        # print(f"{state = }")
         return state
 
 
@@ -645,6 +643,7 @@ class Partie:
 
                     # Vérification de la validité de l'action
                     if (index >= len(joueur.main)) or (index not in indice_carte_dispo):
+                        print("ATTENDS Y A DES COUPS ILLEGAUXXXXXXXXXXXXXXXXXXXXXXXX")
                         # print(f"{joueur.nom}")
                         # print(f"ta fais de la D pour jouer, tu as choisi {index}")
                         # Si l'action est illégale, on apprend directement un malus et réinitialise l'état et rejouer
@@ -898,7 +897,6 @@ class Partie:
         for joueur in self.joueurs:
             print(f"{joueur.nom} - Points: {joueur.points}, Points bonus: {joueur.points_bonus}")
             if joueur.is_agent:
-                print(f"{joueur.agent.epsilon_jouer = } \n {joueur.agent.epsilon_predire = }")
                 joueur.agent.update_value_loss()
                 joueur.agent.reset_game_loss()
         
@@ -919,13 +917,11 @@ class Partie:
         logger_partie.info("\n\n")
         for joueur in self.joueurs:
             logger_partie.info(f"{joueur.nom} - Points: {joueur.points}, Points bonus: {joueur.points_bonus}")
-            if joueur.is_agent:
-                logger_partie.info(f"epsilon_jouer: {joueur.agent.epsilon_jouer}, epsilon_predire: {joueur.agent.epsilon_predire}")
         logger_partie.info(f"\nLe gagnant est {gagnant.nom} avec {gagnant.points} points!")
 
     def entrainement_ia(self, nb_de_joueur):
         # n_agents = 4
-        n_episodes = 50
+        n_episodes = 500
         model_dir = f'models{nb_de_joueur}/'
 
         # Assurez-vous que le répertoire de modèles existe

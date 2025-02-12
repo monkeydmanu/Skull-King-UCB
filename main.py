@@ -2,7 +2,7 @@ import skull_king_last_update as sk
 import pygame
 import random
 
-nb_de_joueur = 2
+nb_de_joueur = 5
 input_dims = 149 + 15 # 15 est le nombre de rajout de phase prediction pour l'entrée du modèle pour insister dessus pour l'ia
 input_dims = (input_dims,) if isinstance(input_dims, int) else input_dims
 
